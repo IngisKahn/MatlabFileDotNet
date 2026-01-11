@@ -1,10 +1,12 @@
 ﻿namespace MatlabFileIO;
 
 using System.ComponentModel.DataAnnotations;
+using System.IO.Compression;
 using System.Text;
 
 public abstract class Variable
 {
+    public string Name { get; protected set; } = string.Empty;
     internal static Variable Read(BinaryReader reader, Tag tag, Header header) 
         => tag.MatlabType.ReadVariable(reader, tag, header);
 }
@@ -63,7 +65,17 @@ internal class MatrixMatlabType : MatlabType
 
 internal class CompressedMatlabType : MatlabType
 {
-
+    public override Variable ReadVariable(BinaryReader reader, Tag tag, Header header)
+    {
+        using MemoryStream compressedStream = new(reader.ReadBytes((int)tag.Length));
+        using ZLibStream zlibStream = new(compressedStream, CompressionMode.Decompress);
+        using MemoryStream uncompressedStream = new();
+        zlibStream.CopyTo(uncompressedStream);
+        uncompressedStream.Seek(0, SeekOrigin.Begin);
+        using BinaryReader br = new(uncompressedStream);
+        Tag ct = new(br, header);
+        return ct.MatlabType.ReadVariable(br, ct, header);
+    }
 }
 
 internal class EncodedCharacterMatlabType(Encoding encoding) : MatlabType

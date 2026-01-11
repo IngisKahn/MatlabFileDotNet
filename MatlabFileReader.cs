@@ -24,27 +24,10 @@ public class Matfile
     {
         while(reader.BaseStream.Position < reader.BaseStream.Length)
         {
-            Variable v = new();
-
-            Tag t = new(reader, this.Header);
-            if(t.MatlabType is InvalidMatlabType)
-                throw new MatlabFileException("Invalid data type id encountered");
-            else if (t.dataType.Equals(typeof(Array))) //We use Array to indicate MiMatrix
-            {
-                ReadMatrix(ref v, t.length, reader);
-            } else if (t.dataType.Equals(typeof(ZLibStream)))
-            {
-                byte[] compressed = reader.ReadBytes((int)t.length);
-                //byte[] decompressed = ZLibStream.UncompressBuffer(compressed);
-                //MemoryStream m = new MemoryStream(decompressed);
-                //BinaryReader br = new BinaryReader(m);
-                //Tag ct = MatfileHelper.ReadTag(br);
-                //ReadMatrix(ref v, ct.length, br);
-            }
-            else
-                throw new Exception("Not an array, don't know what to do with this stuff");
-            
-            //Variables.Add(v.name, v);
+            Tag tag = new(reader, this.Header);
+            var variable = tag.MatlabType.ReadVariable(reader, tag, this.Header);
+            if (variable != null)
+                this.variables[variable.Name] = variable;
         }
     }
 
@@ -56,7 +39,7 @@ public class Matfile
         //Array flags
         //Will always be too large to be in small data format, so not checking t.data
         Flag Flag = matrixStream.ReadFlag();
-        vi.dataType = Flag.dataClass;
+        //vi.dataType = Flag.dataClass;
 
         //Dimensions - There are always 2 dimensions, so this
         //tag will never be of small data format, i.e. not checking for t.data
