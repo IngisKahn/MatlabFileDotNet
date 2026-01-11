@@ -12,7 +12,8 @@ namespace MatlabFileIO
     {
         public Type dataType;
         public String name;
-        public object data;
+        public object data; 
+        public object Image;
     }
 
     internal enum MatfileVersion
@@ -25,6 +26,14 @@ namespace MatlabFileIO
         public Type dataType;
         public UInt32 length;
         public object data; //In case of small data format, otherwise null
+    }
+    internal class Flag
+    {
+        public Tag Tag;
+        public bool Complex = false;
+        public bool Global = false;
+        public bool Logical = false;
+        public Type dataClass;
     }
 
     internal class Header
@@ -100,6 +109,26 @@ namespace MatlabFileIO
                 t.length = BitConverter.ToUInt32(bytes, 4);
             }
             return t;
+        }
+
+
+        public static Flag ReadFlag(this BinaryReader reader)
+        {
+            Flag f = new Flag() { Complex = false, Global = false, Logical = false };
+            f.Tag = reader.ReadTag();
+            UInt32 flagsClass = reader.ReadUInt32();
+            byte flags = (byte)(flagsClass >> 8);
+            if ((flags & 0x08) == 0x08)
+                f.Complex = true;
+            if ((flags & 0x04) == 0x04)
+                f.Global = true;
+            if ((flags & 0x02) == 0x02)
+                f.Logical = true;
+            f.dataClass = MatfileHelper.parseArrayType((byte)flagsClass);
+            reader.ReadUInt32();//unused flags
+            //Flag f = matrixStream.ReadFlag();
+
+            return f;
         }
 
         public static void AdvanceTo8ByteBoundary(this BinaryReader r)
