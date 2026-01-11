@@ -5,7 +5,7 @@ internal interface IMatlabFileWriterLocker
     bool HasFinished();
 }
 
-public class MatLabFileArrayWriter : IMatlabFileWriterLocker
+public class MatLabFileArrayWriter<T> : IMatlabFileWriterLocker
 {
     private readonly BinaryWriter writeStream;
     private bool hasFinished;
@@ -15,64 +15,62 @@ public class MatLabFileArrayWriter : IMatlabFileWriterLocker
     private long dataLengthStartPosition;
     private long dimensionsStartPosition;
 
-    int[] dimensions = [0, 0];
-    private long dataLength = 0;
-    private long headerLength = 0;
+    private readonly int[] dimensions = [0, 0];
+    private long dataLength;
+    private readonly long headerLength;
     private int totalPaddingAdded = 0;
 
-    public MatLabFileArrayWriter(Type t, string varName, BinaryWriter writeStream)
+    public MatLabFileArrayWriter(string varName, BinaryWriter writeStream)
     {
-        if(t == typeof(Int64) || t == typeof(UInt64))
+        if(typeof(T) == typeof(long) || typeof(T) == typeof(ulong))
             throw new Exception("64 bit integer arrays are not supported by matlab file format");
+
         this.writeStream = writeStream;
         this.hasFinished = false;
 
-        long beginPosition = writeStream.BaseStream.Position;
+        var beginPosition = writeStream.BaseStream.Position;
 
         //array header
-        WriteArrayTag();
+        this.WriteArrayTag();
 
         //flags
-        WriteFlags(t);
+        this.WriteFlags();
 
         //dimensions            
-        WriteDimensionsPlaceholder();
+        this.WriteDimensionsPlaceholder();
 
         // array  name
-        WriteName(varName);
+        this.WriteName(varName);
 
         //keep track of how many bytes were already consumed for this header
-        headerLength = writeStream.BaseStream.Position - beginPosition;            
+        headerLength = writeStream.BaseStream.Position - beginPosition;
 
         //data header
-        WriteDataHeader(t);
+        this.WriteDataHeader();
 
         //reset dataLength, as this might have been affected by padding
-        dataLength = 0;
-        totalPaddingAdded = 0;
+        this.dataLength = 0;
+        this.totalPaddingAdded = 0;
     }
 
-    private void WriteDataHeader(Type t)
+    private void WriteDataHeader()
     {
         //type of contents
-        writeStream.Write(MatfileHelper.MatlabArrayTypeNumber(t));
+        writeStream.Write(MatfileHelper.MatlabArrayTypeNumber<T>());
         
         //store position, so we can later overwrite this placeholder
         dataLengthStartPosition = writeStream.BaseStream.Position;
         
         //add placeholder for size
-        for (int i = 0; i < 4; i++)
+        for (var i = 0; i < 4; i++)
             writeStream.Write((byte)0xcc);            
     }
 
-    public void AddRow(object dataToAppend)
+    public void AddRow(T data) => this.AddRow([data]);
+
+    public void AddRow(T[] data)
     {
-        Array data = dataToAppend as Array;
-        if(data == null) 
-        {
-            data = Array.CreateInstance(dataToAppend.GetType(), 1);
-            data.SetValue(dataToAppend, 0);
-        }
+
         //store this dimension size, and check if it is the same as any previous data stored
         if (dimensions[1] == 0) //first data
             dimensions[1] = data.Length;
@@ -81,7 +79,7 @@ public class MatLabFileArrayWriter : IMatlabFileWriterLocker
                 throw new Exception("Data to be appended has a different size than previously appended data!");
         
         //dump data in stream
-        int size = 0;
+        var size = 0;
         if (data.GetType().Equals(typeof(byte[])))
         {
             byte[] castedDataByte = data as byte[];
@@ -218,18 +216,18 @@ public class MatLabFileArrayWriter : IMatlabFileWriterLocker
             writeStream.Write((byte)0xff);
     }
 
-    private void WriteFlags(Type arrayElementDataType)
+    private void WriteFlags()
     {
         //write 4 values for flag block
 
         //Array flags use uint32 data type
-        writeStream.Write(MatfileHelper.MatlabDataTypeNumber(typeof(UInt32)));
+        writeStream.Write(MatfileHelper.MatlabDataTypeNumber<uint>());
 
         //flag block length (always 8)
         writeStream.Write((int)8);
 
         //array class
-        writeStream.Write(MatfileHelper.MatlabArrayTypeNumber(arrayElementDataType));
+        writeStream.Write(MatfileHelper.MatlabArrayTypeNumber<T>());
 
         //padding (always 0)
         writeStream.Write((int)0);            
@@ -238,7 +236,7 @@ public class MatLabFileArrayWriter : IMatlabFileWriterLocker
     private void WriteDimensionsPlaceholder()
     {            
         //data type contained in dimensions subelement: Int32
-        writeStream.Write(MatfileHelper.MatlabDataTypeNumber(typeof(Int32)));
+        writeStream.Write(MatfileHelper.MatlabDataTypeNumber<int>());
 
         //always 8 bytes long
         writeStream.Write((int)8);
@@ -247,7 +245,7 @@ public class MatLabFileArrayWriter : IMatlabFileWriterLocker
         dimensionsStartPosition = writeStream.BaseStream.Position;
 
         //placeholder for first dimension
-        for (int i = 0; i < dimensions.Length * MatfileHelper.MatlabBytesPerType(typeof(Int32)); i++)
+        for (int i = 0; i < dimensions.Length * MatfileHelper.MatlabBytesPerType<int>(); i++)
             writeStream.Write((byte)0xee);
 
         totalPaddingAdded += writeStream.AdvanceTo8ByteBoundary();
@@ -258,7 +256,7 @@ public class MatLabFileArrayWriter : IMatlabFileWriterLocker
         //write 4 values for name block
 
         //data type contained in name block (always 1)
-        writeStream.Write(MatfileHelper.MatlabDataTypeNumber(typeof(SByte)));
+        writeStream.Write(MatfileHelper.MatlabDataTypeNumber<sbyte>());
 
         //size (without padding!)
         int nameLength = name.Length;
