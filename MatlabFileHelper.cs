@@ -1,19 +1,22 @@
 ﻿namespace MatlabFileIO;
 
-public class Variable
+using System.ComponentModel.DataAnnotations;
+using System.Text;
+
+public abstract class Variable
 {
-    public Type dataType;
-    public String name;
-    public object data; 
-    public object Image;
+    internal static Variable Read(BinaryReader reader, Tag tag, Header header) 
+        => tag.MatlabType.ReadVariable(reader, tag, header);
 }
 
-internal class Tag
+public class Variable<T> : Variable
 {
-    public Type dataType;
-    public UInt32 length;
-    public object data; //In case of small data format, otherwise null
+    public T Data { get; set; }
+    internal Variable(T data) => this.Data = data;
 }
+
+
+
 internal class Flag
 {
     public Tag Tag;
@@ -23,66 +26,61 @@ internal class Flag
     public Type dataClass;
 }
 
-public static class MatfileIO
+internal abstract class MatlabType
 {
-    public static bool IsTypeSupported(Type t)
-    {
-        return t != null && MatfileHelper.ArrayTypes.Contains(t);
-    }
+    public virtual Variable ReadVariable(BinaryReader reader, Tag tag, Header header) =>
+        throw new NotImplementedException();
+}
 
+internal class InvalidMatlabType : MatlabType
+{ 
+}
+
+internal class PrimitiveMatlabType<T> : MatlabType where T : unmanaged
+{
+    public override Variable ReadVariable(BinaryReader reader, Tag tag, Header header)
+    {
+        var bytes = tag.Length <= 4 
+            ? BitConverter.GetBytes(tag.EmbededData) 
+            : reader.ReadBytes((int)tag.Length);
+        unsafe
+        {
+            var count = bytes.Length / sizeof(T);
+            var data = new T[count];
+            fixed (byte* pBytes = bytes)
+            fixed (T* pData = data)            
+                Buffer.MemoryCopy(pBytes, pData, bytes.Length, bytes.Length);
+            
+            return new Variable<T[]>(data);
+        }
+    }
+}
+
+internal class MatrixMatlabType : MatlabType
+{
+
+}
+
+internal class CompressedMatlabType : MatlabType
+{
+
+}
+
+internal class EncodedCharacterMatlabType(Encoding encoding) : MatlabType
+{
 }
 
 internal static class MatfileHelper
 {
     public const int SZ_TAG = 8; //Tag size in bytes
 
-    public static Type[] DataType = new Type[]
-    {
-        null,           //0
-        typeof(SByte),  //1
-        typeof(Byte),   //2
-        typeof(Int16),  //3
-        typeof(UInt16), //4
-        typeof(Int32),  //5
-        typeof(UInt32), //6
-        typeof(Single), //7
-        null,           //8 - reserved
-        typeof(Double), //9
-        null,           //10 - reserved
-        null,           //11 - reserved
-        typeof(Int64),  //12
-        typeof(UInt64), //13
-        typeof(Array),  //14 MiMatrix
-        typeof(System.IO.Compression.ZLibStream), //15 Compressed Zlib data
-        null,           //16 UTF-8  - not supported
-        null,           //17 UTF-16 - not supported
-        null            //18 UTF-32 - not supported
-    };
-
-    public static Tag ReadTag(this BinaryReader reader)
-    {
-
-        byte[] bytes = reader.ReadBytes(SZ_TAG);
-        Tag t = new Tag();
-
-        t.dataType = DataType[BitConverter.ToInt16(bytes, 0)];
-        if (BitConverter.ToUInt16(bytes, 2) != 0) //Small tag fmt
-        {   
-            t.length = BitConverter.ToUInt16(bytes, 2);
-            t.data = CastToMatlabType<int>(bytes, 4, (int)t.length);
-        }
-        else
-        {
-            t.length = BitConverter.ToUInt32(bytes, 4);
-        }
-        return t;
-    }
+  
 
 
     public static Flag ReadFlag(this BinaryReader reader)
     {
         Flag f = new Flag() { Complex = false, Global = false, Logical = false };
-        f.Tag = reader.ReadTag();
+        //f.Tag = reader.ReadTag();
         UInt32 flagsClass = reader.ReadUInt32();
         byte flags = (byte)(flagsClass >> 8);
         if ((flags & 0x08) == 0x08)
@@ -110,50 +108,6 @@ internal static class MatfileHelper
         for(int i =0; i < offset; i ++)
             w.Write(stuffing);
         return (int)offset;
-    }
-
-    public static void WriteMatlabHeader(this BinaryWriter writeStream)
-    {
-        string descriptiveText = "MATLAB MAT-file v5, Platform: " + Environment.OSVersion.Platform + ", CREATED on: " + DateTime.Now.ToString();
-
-        //write text
-        for (int i = 0; i < descriptiveText.Length; i++)
-            writeStream.Write(descriptiveText[i]);
-
-        //pad to 124 bytes
-        for (int i = 0; i < 124 - descriptiveText.Length; i++)
-            writeStream.Write((byte)0);
-
-        //write version into 2 bytes
-        writeStream.Write((short)0x0100);
-
-        //write endian indicator
-        writeStream.Write((byte)'I');
-        writeStream.Write((byte)'M');
-    }
-
-    public static int MatlabBytesPerType<T>()
-    {
-        
-        switch (Type.GetTypeCode(typeof(T)))
-        {
-            case TypeCode.Double:
-                return 8;
-            case TypeCode.Single:
-                return 4;
-            case TypeCode.Int32:
-            case TypeCode.UInt32:
-                return 4;
-            case TypeCode.Int16:
-            case TypeCode.UInt16:
-            case TypeCode.Char:
-                return 2;
-            case TypeCode.SByte:
-            case TypeCode.Byte:
-                return 1;
-            default:
-                throw new NotImplementedException("Writing arrays of type " + Enum.GetName(typeof(TypeCode), typeof(T)).ToString() + " to .mat file not implemented");
-        }
     }
 
     internal static Type[] ArrayTypes = new Type[] {
@@ -185,7 +139,7 @@ internal static class MatfileHelper
     public static int MatlabDataTypeNumber<T>()
     {
         var t = typeof(T);
-        int i = Array.IndexOf(DataType, t);
+        int i = 0;// Array.IndexOf(DataType, t);
         if (i > 0) return i;
         throw new NotImplementedException("Arrays of " + t.ToString() + " to .mat file not implemented");
     }
@@ -203,7 +157,7 @@ internal static class MatfileHelper
     {
         if (length < 0)
             length = data.Length - offset;
-        var result = new T[length / MatlabBytesPerType<T>()];
+        var result = new T[length / 1];//
         Buffer.BlockCopy(data, offset, result, 0, length);
         return result;
     }
