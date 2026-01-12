@@ -27,7 +27,7 @@ public class Matfile
             Tag tag = new(reader, this.Header);
             var variable = tag.MatlabType.ReadVariable(reader, tag, this.Header);
             if (variable != null)
-                this.variables[variable.Name] = variable;
+                this.variables[!string.IsNullOrEmpty(variable.Name) ? variable.Name : ("Unnamed " + this.variables.Count)] = variable;
         }
     }
 

@@ -60,7 +60,19 @@ internal class PrimitiveMatlabType<T> : MatlabType where T : unmanaged
 
 internal class MatrixMatlabType : MatlabType
 {
+    public override Variable ReadVariable(BinaryReader reader, Tag tag, Header header)
+    {
+        var bytes = reader.ReadBytes((int)tag.Length);
+    }
+}
 
+internal abstract class MatrixClass
+{
+
+}
+
+internal class PrimitiveMatrixClass<T> : MatrixClass where T : unmanaged
+{
 }
 
 internal class CompressedMatlabType : MatlabType
@@ -80,6 +92,14 @@ internal class CompressedMatlabType : MatlabType
 
 internal class EncodedCharacterMatlabType(Encoding encoding) : MatlabType
 {
+    public override Variable ReadVariable(BinaryReader reader, Tag tag, Header header)
+    {
+        var bytes = tag.Length <= 4
+            ? BitConverter.GetBytes(tag.EmbededData)
+            : reader.ReadBytes((int)tag.Length);
+        var str = encoding.GetString(bytes);
+        return new Variable<string>(str);
+    }
 }
 
 internal static class MatfileHelper
