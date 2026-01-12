@@ -1,6 +1,5 @@
 ﻿namespace MatlabFileIO;
 
-using System.ComponentModel.DataAnnotations;
 using System.IO.Compression;
 using System.Text;
 
@@ -15,17 +14,6 @@ public class Variable<T> : Variable
 {
     public T Data { get; set; }
     internal Variable(T data) => this.Data = data;
-}
-
-
-
-internal class Flag
-{
-    public Tag Tag;
-    public bool Complex = false;
-    public bool Global = false;
-    public bool Logical = false;
-    public Type dataClass;
 }
 
 internal abstract class MatlabType
@@ -50,8 +38,14 @@ internal class PrimitiveMatlabType<T> : MatlabType where T : unmanaged
             var count = bytes.Length / sizeof(T);
             var data = new T[count];
             fixed (byte* pBytes = bytes)
-            fixed (T* pData = data)            
+            fixed (T* pData = data)
+            {
                 Buffer.MemoryCopy(pBytes, pData, bytes.Length, bytes.Length);
+
+                if (header.IsSameEndian == false && sizeof(T) > 1)
+                    for (var i = 0; i < count; i++)
+                        new Span<byte>((byte*)pData + i * sizeof(T), sizeof(T)).Reverse();
+            }
             
             return new Variable<T[]>(data);
         }
@@ -63,16 +57,121 @@ internal class MatrixMatlabType : MatlabType
     public override Variable ReadVariable(BinaryReader reader, Tag tag, Header header)
     {
         var bytes = reader.ReadBytes((int)tag.Length);
+
+        using MemoryStream matrixStream = new(bytes);
+        using BinaryReader matrixReader = new(matrixStream);
+        return MatrixVariable.ReadMatrix(matrixReader, tag, header);
     }
 }
 
-internal abstract class MatrixClass
+public abstract class MatrixVariable : Variable
 {
+    public enum MatrixClass : byte
+    {
+        Cell = 1,
+        Struct = 2,
+        Object = 3,
+        Char = 4,
+        Sparse = 5,
+        Double = 6,
+        Single = 7,
+        Int8 = 8,
+        UInt8 = 9,
+        Int16 = 10,
+        UInt16 = 11,
+        Int32 = 12,
+        UInt32 = 13,
+        Int64 = 14,
+        UInt64 = 15,
+        FunctionHandle = 16,
+        Logical = 17,
+        LittleEndianPackedArray = 18,
+        MxUnknown = 0xFF
+    }
 
+    [Flags]
+    public enum MatrixFlags : byte
+    {
+        Complex = 0x08,
+        Global = 0x04,
+        Logical = 0x02
+    }
+
+    internal static MatrixVariable ReadMatrix(BinaryReader reader, Tag tag, Header header)
+    {
+        // Read Array Flags
+        Tag arrayFlagsTag = new(reader, header);
+        if (arrayFlagsTag.MatlabType is not PrimitiveMatlabType<uint> || arrayFlagsTag.Length != 8)
+            throw new MatlabFileException("Invalid Array Flags in Matrix");
+        var flagsData = Read(reader, arrayFlagsTag, header) as Variable<uint[]>
+            ?? throw new MatlabFileException("Failed to read Array Flags in Matrix");
+        var flags = (MatrixFlags)(flagsData.Data[0] >> 8);
+        var matrixClass = (MatrixClass)(flagsData.Data[0] & 0xFF);
+        var isComplex = flags.HasFlag(MatrixFlags.Complex);
+        return matrixClass switch
+        {
+            MatrixClass.Cell => throw new NotImplementedException(),
+            MatrixClass.Struct => throw new NotImplementedException(),
+            MatrixClass.Object => throw new NotImplementedException(),
+            MatrixClass.Char => new PrimitiveMatrixClass<char>(reader, header, isComplex),
+            MatrixClass.Sparse => throw new NotImplementedException(),
+            MatrixClass.Double => new PrimitiveMatrixClass<double>(reader, header, isComplex),
+            MatrixClass.Single => new PrimitiveMatrixClass<float>(reader, header, isComplex),
+            MatrixClass.Int8 => new PrimitiveMatrixClass<sbyte>(reader, header, isComplex),
+            MatrixClass.UInt8 => new PrimitiveMatrixClass<byte>(reader, header, isComplex),
+            MatrixClass.Int16 => new PrimitiveMatrixClass<short>(reader, header, isComplex),
+            MatrixClass.UInt16 => new PrimitiveMatrixClass<ushort>(reader, header, isComplex),
+            MatrixClass.Int32 => new PrimitiveMatrixClass<int>(reader, header, isComplex),
+            MatrixClass.UInt32 => new PrimitiveMatrixClass<uint>(reader, header, isComplex),
+            MatrixClass.Int64 => new PrimitiveMatrixClass<long>(reader, header, isComplex),
+            MatrixClass.UInt64 => new PrimitiveMatrixClass<ulong>(reader, header, isComplex),
+            MatrixClass.FunctionHandle => throw new NotImplementedException(),
+            MatrixClass.Logical => throw new NotImplementedException(),
+            MatrixClass.LittleEndianPackedArray => throw new NotImplementedException(),
+            _ => throw new MatlabFileException("Unknown matrix type"),
+        };
+    }
+
+    protected MatrixVariable(BinaryReader reader, Header header)
+    {
+        Tag dimensionsTag = new(reader, header);
+        if (dimensionsTag.MatlabType is not PrimitiveMatlabType<int>)
+            throw new MatlabFileException("Invalid Dimensions Array in Matrix");
+
+        var dimensions = Read(reader, dimensionsTag, header) as Variable<int[]>
+            ?? throw new MatlabFileException("Failed to read Dimensions Array in Matrix");
+
+        Tag nameTag = new(reader, header);
+
+        if (nameTag.MatlabType is not PrimitiveMatlabType<sbyte>)
+            throw new MatlabFileException("Invalid Array Name in Matrix");
+
+        var nameData = Read(reader, nameTag, header) as Variable<sbyte[]>
+            ?? throw new MatlabFileException("Failed to read Array Name in Matrix");
+
+        this.Name = Encoding.ASCII.GetString(Array.ConvertAll(nameData.Data, b => (byte)b));
+    }
 }
 
-internal class PrimitiveMatrixClass<T> : MatrixClass where T : unmanaged
+internal class PrimitiveMatrixClass<T> : MatrixVariable where T : unmanaged
 {
+    public Variable<T[]> RealData { get; }
+    public Variable<T[]>? ImaginaryData { get; }
+    public PrimitiveMatrixClass(BinaryReader reader, Header header, bool isComplex) : base(reader, header)
+    {
+        Tag realDataTag = new(reader, header);
+        if (realDataTag.MatlabType is not PrimitiveMatlabType<T>)
+            throw new MatlabFileException("Invalid Real Data in Matrix");
+        this.RealData = Read(reader, realDataTag, header) as Variable<T[]> 
+            ?? throw new MatlabFileException("Failed to read Real Data in Matrix");
+        if (!isComplex)
+            return;
+        Tag imaginaryDataTag = new(reader, header);
+        if (imaginaryDataTag.MatlabType is not PrimitiveMatlabType<T>)
+            throw new MatlabFileException("Invalid Imaginary Data in Matrix");
+        this.ImaginaryData = Read(reader, imaginaryDataTag, header) as Variable<T[]>
+            ?? throw new MatlabFileException("Failed to read Imaginary Data in Matrix");
+    }
 }
 
 internal class CompressedMatlabType : MatlabType
@@ -99,108 +198,5 @@ internal class EncodedCharacterMatlabType(Encoding encoding) : MatlabType
             : reader.ReadBytes((int)tag.Length);
         var str = encoding.GetString(bytes);
         return new Variable<string>(str);
-    }
-}
-
-internal static class MatfileHelper
-{
-    public const int SZ_TAG = 8; //Tag size in bytes
-
-  
-
-
-    public static Flag ReadFlag(this BinaryReader reader)
-    {
-        Flag f = new Flag() { Complex = false, Global = false, Logical = false };
-        //f.Tag = reader.ReadTag();
-        UInt32 flagsClass = reader.ReadUInt32();
-        byte flags = (byte)(flagsClass >> 8);
-        if ((flags & 0x08) == 0x08)
-            f.Complex = true;
-        if ((flags & 0x04) == 0x04)
-            f.Global = true;
-        if ((flags & 0x02) == 0x02)
-            f.Logical = true;
-        f.dataClass = MatfileHelper.parseArrayType((byte)flagsClass);
-        reader.ReadUInt32();//unused flags
-        //Flag f = matrixStream.ReadFlag();
-
-        return f;
-    }
-
-    public static void AdvanceTo8ByteBoundary(this BinaryReader r)
-    {
-        long offset = (8 - (r.BaseStream.Position % 8)) % 8;
-        r.BaseStream.Seek(offset, SeekOrigin.Current);
-    }
-
-    public static int AdvanceTo8ByteBoundary(this BinaryWriter w, byte stuffing = 0x00)
-    {
-        long offset = (8 - (w.BaseStream.Position % 8)) % 8;
-        for(int i =0; i < offset; i ++)
-            w.Write(stuffing);
-        return (int)offset;
-    }
-
-    internal static Type[] ArrayTypes = new Type[] {
-        null,               //0
-        null,               //1
-        null,               //2
-        null,               //3
-        typeof(Char),       //4
-        null,               //5
-        typeof(Double),     //6
-        typeof(Single),     //7
-        typeof(SByte),      //8
-        typeof(Byte),       //9
-        typeof(Int16),      //10
-        typeof(UInt16),     //11
-        typeof(Int32),      //12
-        typeof(UInt32),     //13
-        typeof(Int64),      //14
-        typeof(UInt64)      //15
-    };
-
-    public static Type parseArrayType(byte contentTypeInt)
-    {
-        Type t = ArrayTypes[contentTypeInt];
-        if (t != null) return t;
-        throw new Exception("Content of array not supported");
-    }
-
-    public static int MatlabDataTypeNumber<T>()
-    {
-        var t = typeof(T);
-        int i = 0;// Array.IndexOf(DataType, t);
-        if (i > 0) return i;
-        throw new NotImplementedException("Arrays of " + t.ToString() + " to .mat file not implemented");
-    }
-
-    public static int MatlabArrayTypeNumber<T>()
-    {
-        var t = typeof(T);
-        int i = Array.IndexOf(ArrayTypes, t);
-        if (i > 0) return i;
-        throw new NotImplementedException("Arrays of " + t.ToString() + " to .mat file not implemented");
-    }
-
-
-    public static Array CastToMatlabType<T>(byte[] data, int offset = 0, int length = -1)
-    {
-        if (length < 0)
-            length = data.Length - offset;
-        var result = new T[length / 1];//
-        Buffer.BlockCopy(data, offset, result, 0, length);
-        return result;
-    }
-
-    public static Array SliceRow(this Array array, int row)
-    {
-        Array output = Array.CreateInstance(array.GetValue(0,0).GetType(), array.GetLength(1));
-        for (var i = 0; i < array.GetLength(1); i++)
-        {
-            output.SetValue(array.GetValue(new int[] { row, i }), i);
-        }
-        return output;
     }
 }
