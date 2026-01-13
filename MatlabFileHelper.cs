@@ -1,37 +1,93 @@
 ﻿namespace MatlabFileIO;
 
-using System.IO.Compression;
+using System.Numerics;
 using System.Text;
 
-public abstract class Variable
+public abstract class Array
 {
     public string Name { get; protected set; } = string.Empty;
-    internal static Variable Read(BinaryReader reader, Tag tag, Header header) 
-        => tag.MatlabType.ReadVariable(reader, tag, header);
+    internal static Array Read(BinaryReader reader, ArrayTag tag, Header header)
+        => tag.ArrayType.ReadArray(reader, tag, header);
+    internal static Array Read(BinaryReader reader, Header header)
+    {
+        ArrayTag tag = new(reader, header);
+        return Read(reader, tag, header);
+    }
+
+    internal static Array ReadArrayOfType<T>(BinaryReader reader, Header header) where T : ArrayType
+    {
+        ArrayTag tag = new(reader, header);
+        return tag.ArrayType is not T
+            ? throw new MatlabFileException($"Expected array of type {typeof(T).Name} but got {tag.ArrayType.GetType().Name}")
+            : Read(reader, tag, header);
+    }
+
+    internal static Array ReadArrayOfType<T>(BinaryReader reader, Header header, int expectedLength) where T : ArrayType
+    {
+        ArrayTag tag = new(reader, header);
+        if (tag.ArrayType is not T)
+            throw new MatlabFileException($"Expected array of type {typeof(T).Name} but got {tag.ArrayType.GetType().Name}");
+        if (tag.Length != expectedLength)
+            throw new MatlabFileException($"Expected array of length {expectedLength} but got {tag.Length}");
+        return Read(reader, tag, header);
+    }
+
+    internal static T[] ReadArrayConvert<T>(BinaryReader reader, Header header) where T : unmanaged, INumber<T>
+    {
+        return Read(reader, header) switch
+        {
+            Array<sbyte> sbyteArray => Convert(sbyteArray.Data),
+            Array<byte> byteArray => Convert(byteArray.Data),
+            Array<short> shortArray => Convert(shortArray.Data),
+            Array<ushort> ushortArray => Convert(ushortArray.Data),
+            Array<int> intArray => Convert(intArray.Data),
+            Array<uint> uintArray => Convert(uintArray.Data),
+            Array<long> longArray => Convert(longArray.Data),
+            Array<ulong> ulongArray => Convert(ulongArray.Data),
+            Array<float> floatArray => Convert(floatArray.Data),
+            Array<double> doubleArray => Convert(doubleArray.Data),
+            String stringArray => Convert(stringArray.Data.ToArray()),
+            _ => throw new MatlabFileException("Unsupported array type for conversion"),
+        };
+
+        static T[] Convert<U>(U[] data) where U : unmanaged, INumber<U>
+        {
+            var result = new T[data.Length];
+            for (var i = 0; i < data.Length; i++)
+                result[i] = T.CreateChecked(data[i]);
+            return result;
+        }
+    }
 }
 
-public class Variable<T> : Variable
+public class Array<T> : Array
 {
-    public T Data { get; set; }
-    internal Variable(T data) => this.Data = data;
+    public T[] Data { get; set; }
+    internal Array(T[] data) => this.Data = data;
 }
 
-internal abstract class MatlabType
+public class String : Array
 {
-    public virtual Variable ReadVariable(BinaryReader reader, Tag tag, Header header) =>
+    public string Data { get; set; }
+    internal String(string data) => this.Data = data;
+}
+
+internal abstract class ArrayType
+{
+    public virtual Array ReadArray(BinaryReader reader, ArrayTag tag, Header header) =>
         throw new NotImplementedException();
 }
 
-internal class InvalidMatlabType : MatlabType
-{ 
+internal class InvalidArrayType : ArrayType
+{
 }
 
-internal class PrimitiveMatlabType<T> : MatlabType where T : unmanaged
+internal class PrimitiveArrayType<T> : ArrayType where T : unmanaged
 {
-    public override Variable ReadVariable(BinaryReader reader, Tag tag, Header header)
+    public override Array ReadArray(BinaryReader reader, ArrayTag tag, Header header)
     {
-        var bytes = tag.Length <= 4 
-            ? BitConverter.GetBytes(tag.EmbededData) 
+        var bytes = tag.Length <= 4
+            ? BitConverter.GetBytes(tag.EmbededData)
             : reader.ReadBytes((int)tag.Length);
         unsafe
         {
@@ -46,25 +102,29 @@ internal class PrimitiveMatlabType<T> : MatlabType where T : unmanaged
                     for (var i = 0; i < count; i++)
                         new Span<byte>((byte*)pData + i * sizeof(T), sizeof(T)).Reverse();
             }
-            
-            return new Variable<T[]>(data);
+
+            //ensure 8 byte alignment
+            if ((reader.BaseStream.Position & 7) != 0)
+                reader.BaseStream.Seek(8 - (reader.BaseStream.Position & 7), SeekOrigin.Current);
+
+            return new Array<T>(data);
         }
     }
 }
 
-internal class MatrixMatlabType : MatlabType
+internal class MatrixType : ArrayType
 {
-    public override Variable ReadVariable(BinaryReader reader, Tag tag, Header header)
+    public override Array ReadArray(BinaryReader reader, ArrayTag tag, Header header)
     {
         var bytes = reader.ReadBytes((int)tag.Length);
 
         using MemoryStream matrixStream = new(bytes);
         using BinaryReader matrixReader = new(matrixStream);
-        return MatrixVariable.ReadMatrix(matrixReader, tag, header);
+        return Matrix.ReadMatrix(matrixReader, header);
     }
 }
 
-public abstract class MatrixVariable : Variable
+public abstract class Matrix : Array
 {
     public enum MatrixClass : byte
     {
@@ -97,24 +157,23 @@ public abstract class MatrixVariable : Variable
         Logical = 0x02
     }
 
-    internal static MatrixVariable ReadMatrix(BinaryReader reader, Tag tag, Header header)
+    internal static Matrix ReadMatrix(BinaryReader reader, Header header)
     {
         // Read Array Flags
-        Tag arrayFlagsTag = new(reader, header);
-        if (arrayFlagsTag.MatlabType is not PrimitiveMatlabType<uint> || arrayFlagsTag.Length != 8)
-            throw new MatlabFileException("Invalid Array Flags in Matrix");
-        var flagsData = Read(reader, arrayFlagsTag, header) as Variable<uint[]>
+        var flagsData = Array.ReadArrayOfType<PrimitiveArrayType<uint>>(reader, header, 8) as Array<uint>
             ?? throw new MatlabFileException("Failed to read Array Flags in Matrix");
+
         var flags = (MatrixFlags)(flagsData.Data[0] >> 8);
         var matrixClass = (MatrixClass)(flagsData.Data[0] & 0xFF);
         var isComplex = flags.HasFlag(MatrixFlags.Complex);
+        var nonZeroMax = flagsData.Data[1];
         return matrixClass switch
         {
-            MatrixClass.Cell => throw new NotImplementedException(),
+            MatrixClass.Cell => new CellMatrixClass(reader, header),
             MatrixClass.Struct => throw new NotImplementedException(),
             MatrixClass.Object => throw new NotImplementedException(),
             MatrixClass.Char => new PrimitiveMatrixClass<char>(reader, header, isComplex),
-            MatrixClass.Sparse => throw new NotImplementedException(),
+            MatrixClass.Sparse => new SparseArrayClass(reader, header, isComplex, nonZeroMax),
             MatrixClass.Double => new PrimitiveMatrixClass<double>(reader, header, isComplex),
             MatrixClass.Single => new PrimitiveMatrixClass<float>(reader, header, isComplex),
             MatrixClass.Int8 => new PrimitiveMatrixClass<sbyte>(reader, header, isComplex),
@@ -126,77 +185,115 @@ public abstract class MatrixVariable : Variable
             MatrixClass.Int64 => new PrimitiveMatrixClass<long>(reader, header, isComplex),
             MatrixClass.UInt64 => new PrimitiveMatrixClass<ulong>(reader, header, isComplex),
             MatrixClass.FunctionHandle => throw new NotImplementedException(),
-            MatrixClass.Logical => throw new NotImplementedException(),
+            MatrixClass.Logical => new LogicalMatrixClass(reader, header),
             MatrixClass.LittleEndianPackedArray => throw new NotImplementedException(),
             _ => throw new MatlabFileException("Unknown matrix type"),
         };
     }
 
-    protected MatrixVariable(BinaryReader reader, Header header)
+    public int[] Dimensions { get; }
+
+    public int TotalElements => this.Dimensions.Aggregate(1, (a, b) => a * b);
+
+    protected Matrix(BinaryReader reader, Header header, bool hasDimensions = true)
     {
-        Tag dimensionsTag = new(reader, header);
-        if (dimensionsTag.MatlabType is not PrimitiveMatlabType<int>)
-            throw new MatlabFileException("Invalid Dimensions Array in Matrix");
+        if (hasDimensions)
+        {
+            ArrayTag dimensionsTag = new(reader, header);
+            if (dimensionsTag.ArrayType is not PrimitiveArrayType<int>)
+                throw new MatlabFileException("Invalid Dimensions Array in Matrix");
 
-        var dimensions = Read(reader, dimensionsTag, header) as Variable<int[]>
-            ?? throw new MatlabFileException("Failed to read Dimensions Array in Matrix");
+            var dimensions = Array.Read(reader, dimensionsTag, header) as Array<int>
+                ?? throw new MatlabFileException("Failed to read Dimensions Array in Matrix");
 
-        Tag nameTag = new(reader, header);
+            this.Dimensions = dimensions.Data;
+        }
+        else
+            this.Dimensions = [];
 
-        if (nameTag.MatlabType is not PrimitiveMatlabType<sbyte>)
+        ArrayTag nameTag = new(reader, header);
+
+        if (nameTag.ArrayType is not PrimitiveArrayType<sbyte>)
             throw new MatlabFileException("Invalid Array Name in Matrix");
 
-        var nameData = Read(reader, nameTag, header) as Variable<sbyte[]>
+        var nameData = Array.Read(reader, nameTag, header) as Array<sbyte>
             ?? throw new MatlabFileException("Failed to read Array Name in Matrix");
 
-        this.Name = Encoding.ASCII.GetString(Array.ConvertAll(nameData.Data, b => (byte)b));
+        this.Name = Encoding.ASCII.GetString(System.Array.ConvertAll(nameData.Data, b => (byte)b));
     }
 }
 
-internal class PrimitiveMatrixClass<T> : MatrixVariable where T : unmanaged
+internal class LogicalMatrixClass : Matrix
 {
-    public Variable<T[]> RealData { get; }
-    public Variable<T[]>? ImaginaryData { get; }
-    public PrimitiveMatrixClass(BinaryReader reader, Header header, bool isComplex) : base(reader, header)
+    public string PrimaryKey { get; }
+    public string SecondaryKey { get; }
+    public Matrix Data { get; }
+    public LogicalMatrixClass(BinaryReader reader, Header header) : base(reader, header, false)
     {
-        Tag realDataTag = new(reader, header);
-        if (realDataTag.MatlabType is not PrimitiveMatlabType<T>)
-            throw new MatlabFileException("Invalid Real Data in Matrix");
-        this.RealData = Read(reader, realDataTag, header) as Variable<T[]> 
-            ?? throw new MatlabFileException("Failed to read Real Data in Matrix");
+        ArrayTag primaryKeyTag = new(reader, header);
+        if (primaryKeyTag.ArrayType is not PrimitiveArrayType<sbyte>)
+            throw new MatlabFileException("Invalid Primary Key in Logical Matrix");
+        var primaryKeyData = Array.Read(reader, primaryKeyTag, header) as Array<sbyte>
+            ?? throw new MatlabFileException("Failed to read Primary Key in Logical Matrix");
+        this.PrimaryKey = Encoding.ASCII.GetString(System.Array.ConvertAll(primaryKeyData.Data, b => (byte)b));
+
+        ArrayTag secondaryKeyTag = new(reader, header);
+        if (secondaryKeyTag.ArrayType is not PrimitiveArrayType<sbyte>)
+            throw new MatlabFileException("Invalid Secondary Key in Logical Matrix");   
+        var secondaryKeyData = Array.Read(reader, secondaryKeyTag, header) as Array<sbyte>
+            ?? throw new MatlabFileException("Failed to read Secondary Key in Logical Matrix");
+        this.SecondaryKey = Encoding.ASCII.GetString(System.Array.ConvertAll(secondaryKeyData.Data, b => (byte)b));
+
+        this.Data = (Matrix)Array.Read(reader, header);
+    }
+}
+
+internal class CellMatrixClass : Matrix
+{
+    public Array[] Cells { get; }
+    public CellMatrixClass(BinaryReader reader, Header header) : base(reader, header)
+    {
+        this.Cells = new Array[this.TotalElements];
+        for (var i = 0; i < this.TotalElements; i++)
+            this.Cells[i] = Array.Read(reader, header);
+    }
+}
+
+internal class SparseArrayClass : Matrix
+{
+    public Array<int> RowIndices { get; }
+    public Array<int> ColumnPointers { get; }
+    public Array RealData { get; }
+    public Array? ImaginaryData { get; }
+    public SparseArrayClass(BinaryReader reader, Header header, bool isComplex, uint nonZeroMax) : base(reader, header)
+    {
+        ArrayTag rowIndicesTag = new(reader, header);
+        if (rowIndicesTag.ArrayType is not PrimitiveArrayType<int>)
+            throw new MatlabFileException("Invalid Row Indices in Sparse Matrix");
+        this.RowIndices = Array.Read(reader, rowIndicesTag, header) as Array<int>
+            ?? throw new MatlabFileException("Failed to read Row Indices in Sparse Matrix");
+        ArrayTag columnPointersTag = new(reader, header);
+        if (columnPointersTag.ArrayType is not PrimitiveArrayType<int>)
+            throw new MatlabFileException("Invalid Column Pointers in Sparse Matrix");
+        this.ColumnPointers = Array.Read(reader, columnPointersTag, header) as Array<int>
+            ?? throw new MatlabFileException("Failed to read Column Pointers in Sparse Matrix");
+        ArrayTag realDataTag = new(reader, header);
+        this.RealData = Array.Read(reader, realDataTag, header);
         if (!isComplex)
             return;
-        Tag imaginaryDataTag = new(reader, header);
-        if (imaginaryDataTag.MatlabType is not PrimitiveMatlabType<T>)
-            throw new MatlabFileException("Invalid Imaginary Data in Matrix");
-        this.ImaginaryData = Read(reader, imaginaryDataTag, header) as Variable<T[]>
-            ?? throw new MatlabFileException("Failed to read Imaginary Data in Matrix");
+        ArrayTag imaginaryDataTag = new(reader, header);
+        this.ImaginaryData = Array.Read(reader, imaginaryDataTag, header);
     }
 }
 
-internal class CompressedMatlabType : MatlabType
+internal class PrimitiveMatrixClass<T> : Matrix where T : unmanaged, INumber<T>
 {
-    public override Variable ReadVariable(BinaryReader reader, Tag tag, Header header)
+    public T[] RealData { get; }
+    public T[]? ImaginaryData { get; }
+    public PrimitiveMatrixClass(BinaryReader reader, Header header, bool isComplex) : base(reader, header)
     {
-        using MemoryStream compressedStream = new(reader.ReadBytes((int)tag.Length));
-        using ZLibStream zlibStream = new(compressedStream, CompressionMode.Decompress);
-        using MemoryStream uncompressedStream = new();
-        zlibStream.CopyTo(uncompressedStream);
-        uncompressedStream.Seek(0, SeekOrigin.Begin);
-        using BinaryReader br = new(uncompressedStream);
-        Tag ct = new(br, header);
-        return ct.MatlabType.ReadVariable(br, ct, header);
-    }
-}
-
-internal class EncodedCharacterMatlabType(Encoding encoding) : MatlabType
-{
-    public override Variable ReadVariable(BinaryReader reader, Tag tag, Header header)
-    {
-        var bytes = tag.Length <= 4
-            ? BitConverter.GetBytes(tag.EmbededData)
-            : reader.ReadBytes((int)tag.Length);
-        var str = encoding.GetString(bytes);
-        return new Variable<string>(str);
+        this.RealData = Array.ReadArrayConvert<T>(reader, header);
+        if (isComplex)
+            this.ImaginaryData = Array.ReadArrayConvert<T>(reader, header);
     }
 }

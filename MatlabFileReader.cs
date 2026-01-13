@@ -2,8 +2,8 @@
 
 public class Matfile
 {
-    private readonly Dictionary<string, Variable> variables = [];
-    public IReadOnlyDictionary<string, Variable> Variables => this.variables;
+    private readonly Dictionary<string, Array> arrays = [];
+    public IReadOnlyDictionary<string, Array> Arrays => this.arrays;
     public Header Header { get; }
 
     public Matfile(string fileName)
@@ -14,17 +14,18 @@ public class Matfile
         //Parse header (will throw if fail)
         this.Header = new(reader.ReadBytes(128));
 
-        this.ReadVariables(reader);
+        this.ReadArrays(reader);
     }
 
-    private void ReadVariables(BinaryReader reader)
+    private void ReadArrays(BinaryReader reader)
     {
         while(reader.BaseStream.Position < reader.BaseStream.Length)
         {
-            Tag tag = new(reader, this.Header);
-            var variable = tag.MatlabType.ReadVariable(reader, tag, this.Header);
-            if (variable != null)
-                this.variables[!string.IsNullOrEmpty(variable.Name) ? variable.Name : ("Unnamed " + this.variables.Count)] = variable;
+            var array = Array.Read(reader, this.Header);
+            if (array != null)
+                this.arrays[!string.IsNullOrEmpty(array.Name) ? array.Name : ("Unnamed " + this.arrays.Count)] = array;
         }
+
+        var data = ((PrimitiveMatrixClass<byte>)arrays["\0\0\0\0"]).RealData;
     }
 }
